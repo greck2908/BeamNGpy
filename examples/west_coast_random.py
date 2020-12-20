@@ -19,7 +19,7 @@ from matplotlib import pyplot as plt
 from matplotlib.pyplot import imshow
 
 from beamngpy import BeamNGpy, Scenario, Vehicle, setup_logging
-from beamngpy.sensors import Camera, GForces, Lidar, Electrics, Damage, Timer
+from beamngpy.sensors import Camera, GForces, Lidar, Electrics, Damage
 
 
 def main():
@@ -68,18 +68,17 @@ def main():
     gforces = GForces()
     electrics = Electrics()
     damage = Damage()
-    lidar = Lidar(visualized=False)
-    timer = Timer()
+    lidar = Lidar()
 
     # Attach them
     vehicle.attach_sensor('front_cam', front_camera)
     vehicle.attach_sensor('back_cam', back_camera)
     vehicle.attach_sensor('gforces', gforces)
+    vehicle.attach_sensor('lidar', lidar)
     vehicle.attach_sensor('electrics', electrics)
     vehicle.attach_sensor('damage', damage)
-    vehicle.attach_sensor('timer', timer)
 
-    scenario.add_vehicle(vehicle, pos=(-717.121, 101, 118.675), rot=None, rot_quat=(0, 0, 0.3826834, 0.9238795))
+    scenario.add_vehicle(vehicle, pos=(-717.121, 101, 118.675), rot=(0, 0, 45))
 
     # Compile the scenario and place it in BeamNG's map folder
     scenario.make(beamng)
@@ -87,7 +86,6 @@ def main():
     # Start BeamNG and enter the main loop
     bng = beamng.open(launch=True)
     try:
-        bng.hide_hud()
         bng.set_deterministic()  # Set simulator to be deterministic
         bng.set_steps_per_second(60)  # With 60hz temporal resolution
 
@@ -96,6 +94,7 @@ def main():
         bng.start_scenario()
         # Put simulator in pause awaiting further inputs
         bng.pause()
+        bng.hide_hud()
 
         assert vehicle.skt
 
@@ -110,8 +109,6 @@ def main():
 
             # Retrieve sensor data and show the camera data.
             sensors = bng.poll_sensors(vehicle)
-
-            print('{} seconds passed.'.format(sensors['timer']['time']))
 
             a_colour.imshow(sensors['front_cam']['colour'].convert('RGB'))
             a_depth.imshow(sensors['front_cam']['depth'].convert('L'))
