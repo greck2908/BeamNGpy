@@ -5,6 +5,8 @@
                vehicle.
 
 .. moduleauthor:: Marc Müller <mmueller@beamng.gmbh>
+.. moduleauthor:: Pascale Maul <pmaul@beamng.gmbh>
+.. moduleauthor:: Sedonas <https://github.com/Sedonas>
 
 This module implements various sensors that can be attached to vehicles to
 extract data from simulations.
@@ -12,20 +14,59 @@ extract data from simulations.
 import base64
 import logging as log
 import mmap
+import os
+import sys
+from abc import ABC, abstractmethod
 
 import numpy as np
 from PIL import Image
 
 NEAR = 0.01
-FAR = 300
+FAR = 1000
 
-LIDAR_POINTS = 500000
+LIDAR_POINTS = 2000000
 
+class AbstractSensor(ABC):
+    """
+    Abstract Sensor class declaring properties common to the ordinary and noise sensors.
+    """
+    
+    @property
+    @abstractmethod
+    def data(self):
+        pass   
 
-class Sensor:
+    @data.setter
+    @abstractmethod
+    def data(self, data):
+        pass
+
+    @data.deleter
+    @abstractmethod
+    def data(self):
+        pass
+    
+class Sensor(AbstractSensor):
     """
     Sensor meta-class declaring methods common to them.
     """
+    def __init__(self):
+        self._data = dict()     
+
+    @property
+    def data(self):
+        """
+        Property used to store sensor readings.
+        """
+        return self._data
+
+    @data.setter
+    def data(self, data):
+        self._data = data
+    
+    @data.deleter
+    def data(self):
+        self._data = None
 
     def attach(self, vehicle, name):
         """
@@ -121,7 +162,7 @@ class Sensor:
         Called when the attached vehicle is being removed from simulation. This
         method is used to perform teardown code after the simulation.
         """
-        pass
+        del self.data
 
     def get_engine_flags(self):
         """
@@ -180,6 +221,7 @@ class Camera(Sensor):
             depth (bool): Whether to output depth information.
             annotation (bool): Whether to output annotation information.
         """
+        super().__init__()
         self.pos = pos
         self.direction = direction
         self.fov = fov
@@ -209,22 +251,23 @@ class Camera(Sensor):
                                          attached to.
             name (str): The name of the camera.
         """
+        pid = os.getpid()
         prefix = ''
         if vehicle:
             prefix = vehicle.vid
         size = self.resolution[0] * self.resolution[1] * 4  # RGBA / L are 4bbp
         # if self.colour:
-        self.colour_handle = '{}.{}.colour'.format(prefix, name)
+        self.colour_handle = '{}.{}.{}.colour'.format(pid, prefix, name)
         self.colour_shmem = mmap.mmap(0, size, self.colour_handle)
         log.debug('Bound memory for colour: %s', self.colour_handle)
 
         # if self.depth:
-        self.depth_handle = '{}.{}.depth'.format(prefix, name)
+        self.depth_handle = '{}.{}.{}.depth'.format(pid, prefix, name)
         self.depth_shmem = mmap.mmap(0, size, self.depth_handle)
         log.debug('Bound memory for depth: %s', self.depth_handle)
 
         # if self.annotation:
-        self.annotation_handle = '{}.{}.annotate'.format(prefix, name)
+        self.annotation_handle = '{}.{}.{}.annotate'.format(pid, prefix, name)
         self.annotation_shmem = mmap.mmap(0, size, self.annotation_handle)
         log.debug('Bound memory for annotation: %s',
                   self.annotation_handle)
@@ -313,11 +356,11 @@ class Camera(Sensor):
         if self.annotation_shmem:
             req['annotation'] = self.annotation_handle
 
-        req['pos'] = self.pos
-        req['direction'] = self.direction
+        req['pos'] = [float(f) for f in self.pos]
+        req['direction'] = [float(f) for f in self.direction]
         req['fov'] = self.fov
-        req['resolution'] = self.resolution
-        req['near_far'] = self.near_far
+        req['resolution'] = [int(i) for i in self.resolution]
+        req['near_far'] = [float(f) for f in self.near_far]
 
         return req
 
@@ -342,27 +385,39 @@ class Camera(Sensor):
         size = img_w * img_h * 4
 
         if self.colour_shmem:
-            self.colour_shmem.seek(0)
-            colour_d = self.colour_shmem.read(size)
-            colour_d = np.frombuffer(colour_d, dtype=np.uint8)
-            colour_d = colour_d.reshape(img_h, img_w, 4)
-            decoded['colour'] = Image.fromarray(colour_d)
+            if 'color' in resp.keys():
+                self.colour_shmem.seek(0)
+                colour_d = self.colour_shmem.read(size)
+                colour_d = np.frombuffer(colour_d, dtype=np.uint8)
+                colour_d = colour_d.reshape(img_h, img_w, 4)
+                decoded['colour'] = Image.fromarray(colour_d)
+            else:
+                print('Color buffer failed to render. Check that you '
+                      'aren\'t running on low settings.', file=sys.stderr)
 
         if self.annotation_shmem:
-            self.annotation_shmem.seek(0)
-            annotate_d = self.annotation_shmem.read(size)
-            annotate_d = np.frombuffer(annotate_d, dtype=np.uint8)
-            annotate_d = annotate_d.reshape(img_h, img_w, 4)
-            decoded['annotation'] = Image.fromarray(annotate_d)
+            if 'annotation' in resp.keys():
+                self.annotation_shmem.seek(0)
+                annotate_d = self.annotation_shmem.read(size)
+                annotate_d = np.frombuffer(annotate_d, dtype=np.uint8)
+                annotate_d = annotate_d.reshape(img_h, img_w, 4)
+                decoded['annotation'] = Image.fromarray(annotate_d)
+            else:
+                print('Annotation buffer failed to render. Check that you '
+                      'aren\'t running on low settings.', file=sys.stderr)
 
         if self.depth_shmem:
-            self.depth_shmem.seek(0)
-            depth_d = self.depth_shmem.read(size)
-            depth_d = np.frombuffer(depth_d, dtype=np.float32)
-            depth_d = depth_d / FAR
-            depth_d = depth_d.reshape(img_h, img_w)
-            depth_d = np.uint8(depth_d * 255)
-            decoded['depth'] = Image.fromarray(depth_d)
+            if 'depth' in resp.keys():
+                self.depth_shmem.seek(0)
+                depth_d = self.depth_shmem.read(size)
+                depth_d = np.frombuffer(depth_d, dtype=np.float32)
+                depth_d = depth_d / FAR
+                depth_d = depth_d.reshape(img_h, img_w)
+                depth_d = np.uint8(depth_d * 255)
+                decoded['depth'] = Image.fromarray(depth_d)
+            else:
+                print('Depth buffer failed to render. Check that you '
+                      'aren\'t running on low settings.', file=sys.stderr)
 
         return decoded
 
@@ -389,12 +444,24 @@ class Lidar(Sensor):
 
     shmem_size = LIDAR_POINTS * 3 * 4
 
-    def __init__(self):
-        """
-        TODO: Add options to customise Lidar
-        """
+    def __init__(self, offset=(0, 0, 1.7), direction=(0, -1, 0), vres=32,
+                 vangle=26.9, rps=2200000, hz=20, angle=360, max_dist=200,
+                 visualized=True):
+        super().__init__()
         self.handle = None
         self.shmem = None
+
+        self.offset = offset
+        self.direction = direction
+
+        self.vres = vres
+        self.vangle = vangle
+        self.rps = rps
+        self.hz = hz
+        self.angle = angle
+        self.max_dist = max_dist
+
+        self.visualized = visualized
 
     def attach(self, vehicle, name):
         """
@@ -406,7 +473,8 @@ class Lidar(Sensor):
                                          attached to.
             name (str): The name of the sensor.
         """
-        self.handle = '{}.{}.lidar'.format(vehicle.vid, name)
+        pid = os.getpid()
+        self.handle = '{}.{}.{}.lidar'.format(pid, vehicle.vid, name)
         self.shmem = mmap.mmap(0, Lidar.shmem_size, self.handle)
         log.debug('Bound memory for lidar: %s', self.handle)
 
@@ -423,6 +491,16 @@ class Lidar(Sensor):
         """
         self.shmem.close()
 
+    def connect(self, bng, vehicle):
+        bng.open_lidar(self.handle, vehicle, self.handle, Lidar.shmem_size,
+                       offset=self.offset, direction=self.direction,
+                       vres=self.vres, vangle=self.vangle, rps=self.rps,
+                       hz=self.hz, angle=self.angle, max_dist=self.max_dist,
+                       visualized=self.visualized)
+
+    def disconnect(self, bng, vehicle):
+        bng.close_lidar(self.handle)
+
     def encode_engine_request(self):
         """
         Called to obtain the engine request for this lidar sensor. Encodes the
@@ -433,8 +511,7 @@ class Lidar(Sensor):
             a dictionary.
         """
         req = dict(type='Lidar')
-        req['shmem'] = self.handle
-        req['size'] = Lidar.shmem_size
+        req['name'] = self.handle
         return req
 
     def decode_response(self, resp):
@@ -472,6 +549,8 @@ class GForces(Sensor):
 
     # TODO: GForce sensor for specific points on/in the vehicle
     """
+    def __init__(self):
+        super().__init__()
 
     def encode_vehicle_request(self):
         req = dict(type='GForces')
@@ -484,11 +563,142 @@ class Electrics(Sensor):
     eletrics systems. These values include:
 
     # TODO: List all the electrics.lua values.
+    - abs (int): ABS state
+    - abs_active (bool):
+    - airspeed (float): Airspeed
+    - airflowspeed (float):
+    - altitude (float): Z axis position
+    - avg_wheel_av (float):
+    - brake (int): Brake value
+    - brake_lights (int):
+    - brake_input (int): Brake input value
+    - check_engine (bool): Check engine light state.
+    - clutch (int): Clutch value
+    - clutch_input (int): Clutch input value
+    - clutch_ratio (int):
+    - driveshaft (float): Driveshaft
+    - engine_load (float):
+    - engine_throttle (int): Engine throttle state
+    - esc (int): ESC state. 0 = not present/inactive, 1 = disabled,
+                 Blink = active
+    - esc_active (bool):
+    - exhaust_flow (float):
+    - fog_lights (int): Fog light state
+    - fuel (float): Percentage of fuel remaining.
+    - fuel_capacity (int): Total Fuel Capacity [L].
+    - fuel_volume (float):
+    - gear (int):
+    - gear_a (int): Gear selected in automatic mode.
+    - gear_index (int):
+    - gear_m (int): Gear selected in manual mode.
+    - hazard (int): Hazard light state
+    - hazard_signal (bool):
+    - headlights (int):
+    - highbeam (int): High beam state
+    - horn (int):
+    - ignition (bool): Engine state
+    - left_signal (bool):
+    - lightbar (int): Lightbar state
+    - lights (int): General light state. 1 = low, 2 = high
+    - lowbeam (int): Low beam state
+    - lowfuel (bool): Low fuel indicator
+    - lowhighbeam (int): Low-high beam state
+    - lowpressure (int): Low fuel pressure indicator
+    - oil (int):
+    - oil_temperature (float): Oil temperature [C].
+    - parking (int): Parking lights on/off (not implemented yet)
+    - parkingbrake (float): Parking brake state. 0.5 = halfway on
+    - parkingbrake_input (int): Parking brake input state
+    - radiator_fan_spin (int):
+    - reverse (int): Reverse gear state
+    - right_signal (bool):
+    - rpm (float): Engine RPM
+    - rpmspin (float):
+    - rpm_tacho (float):
+    - running (bool): Engine running state
+    - signal_l (int): Left signal state. 0.5 = halfway to full blink
+    - signal_r (int): Right signal state. 0.5 = halfway to full blink
+    - steering (int): Steering state
+    - steering_input (int): Steering input state
+    - tcs (int): TCS state. 0 = not present/inactive, 1 = disabled,
+                 Blink = active
+    - tcs_active (bool):
+    - throttle (int): Throttle state
+    - throttle_factor (int):
+    - throttle_input (int): Throttle input state
+    - turnsignal (int): Turn signal value. -1 = Left, 1 = Right,
+                        gradually 'fades' between values. Use "signal_L" and
+                        "signal_R" for flashing indicators.
+    - two_step (bool):
+    - water_temperature (float): Water temperature [C].
+    - wheelspeed (float): Wheel speed [m/s].
     """
+    name_map = {
+        'absActive': 'abs_active',
+        'avgWheelAV': 'avg_wheel_av',
+        'brakelights': 'brake_lights',
+        'checkengine': 'check_engine',
+        'clutchRatio': 'clutch_ratio',
+        'engineLoad': 'engine_load',
+        'engineThrottle': 'engine_throttle',
+        'escActive': 'esc_active',
+        'exhaustFlow': 'exhaust_flow',
+        'fog': 'fog_lights',
+        'fuelVolume': 'fuel_volume',
+        'fuelCapacity': 'fuel_capacity',
+        'gear_A': 'gear_a',
+        'gearIndex': 'gear_index',
+        'gear_M': 'gear_m',
+        'hazard_enabled': 'hazard_signal',
+        'isShifting': 'is_shifting',
+        'lights_state': 'headlights',
+        'oiltemp': 'oil_temperature',
+        'radiatorFanSpin': 'radiator_fan_spin',
+        'rpmTacho': 'rpm_tacho',
+        'signal_L': 'signal_l',
+        'signal_left_input': 'left_signal',
+        'signal_R': 'signal_r',
+        'signal_right_input': 'right_signal',
+        'tcsActive': 'tcs_active',
+        'throttleFactor': 'throttle_factor',
+        'twoStep': 'two_step',
+        'watertemp': 'water_temperature',
+    }
+    def __init__(self):
+        super().__init__()
+
+    def _rename_values(self, vals):
+        """
+        The values returned from the game often don't follow any naming
+        convention and especially don't follow this library's, so we rename
+        some of them here to be more consistent.
+        """
+
+        for k, v in Electrics.name_map.items():
+            if k in vals:
+                vals[v] = vals[k]
+                del vals[k]
+        return vals
+
+    def _reassign_values(self, vals):
+        if 'left_signal' in vals:
+            vals['left_signal'] = vals['left_signal'] == 1
+        if 'right_signal' in vals:
+            vals['right_signal'] = vals['right_signal'] == 1
+        if 'hazard_signal' in vals:
+            vals['hazard_signal'] = vals['hazard_signal'] == 1
+        return vals
 
     def encode_vehicle_request(self):
         req = dict(type='Electrics')
         return req
+
+    def decode_response(self, resp):
+        if 'values' in resp:
+            ret = self._rename_values(resp['values'])
+            ret = self._reassign_values(ret)
+            return ret
+        return None
 
 
 class Damage(Sensor):
@@ -499,7 +709,40 @@ class Damage(Sensor):
     deformed the vehicle is. It's therefore more of a ground truth than
     simulated sensor data.
     """
+    def __init__(self):
+        super().__init__()
 
     def encode_vehicle_request(self):
         req = dict(type='Damage')
+        return req
+
+
+class Timer(Sensor):
+    """
+    The timer sensor keeps track of the time that has passed since the
+    simulation started. It provides that information in seconds relative to the
+    scenario start and does not represent something like a day time or date. It
+    properly handles pausing the simulation, meaning the value of the timer
+    sensor does not progress while the simulation is paused.
+
+    When polled, this sensor provides the time in seconds since the start of
+    the scenario in a dictionary under the 'time' key.
+    """
+    def __init__(self):
+        super().__init__()
+
+    def encode_engine_request(self):
+        req = dict(type='Timer')
+        return req
+
+class State(Sensor):
+    """
+    The state sensor monitors general stats of the vehicle, such as position, direction, velocity, etc.
+    It is a default sensor every vehicle has and is used to update the vehicle.state attribute.
+    """
+    def __init__(self):
+        super().__init__()
+
+    def encode_vehicle_request(self):
+        req  = dict(type='State')
         return req
